@@ -1,0 +1,368 @@
+---
+title: "Analyzing the Law of One Price through Banana Pricing Regression Models"
+author: "Chris Grace"
+date: "2025-12-05"
+output:
+  html_document:
+    theme: cosmo
+    toc: TRUE
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Introduction: Law of One Price
+
+In economics, the Law of One Price (LOOP) states that in the absence of trade barriers, with free competition, and price flexibility, the price of a good across markets is the same in a common currency.
+
+To investigate the law, we'll consider a commodity good, **bananas**, and explore price discrepancy across markets. To attempt to disprove the LOOP, we'll build a regression model and attempt to predict banana prices. If there's enough price discrepancy between markets for us to construct a usable model, we'll have evidence against the LOOP.
+
+# Part 1: Data Collection
+
+Before we go to the store and see how expensive bananas are, we should figure out what data we need to collect.
+
+We definitely need the price of bananas in the local currency, but what do we define as "bananas"? For our analysis, let's consider 1KG of bananas as a bunch, and use the wholesale per-kilogram price of bananas as our price level. Wholesale prices cut out retail price volatility and most of the markup, so we'll get a more representative metric.
+
+To compute a global price index, we'll also need the exchange rate data to relate the price in local currency to a standard currency. The US dollar is the clear choice here, so we'll collect the average spot exchange rate between local currency and USD for each country.
+
+Most macroeconomic data for 2025 has not been finalized at the time of this analysis, so we'll collect data for 2024. To include as many countries as possible, we'll use a generative AI tool with web search capabilities to do our research for us. These tools are incredibly convenient but require a lot of oversight, both during prompting and when validating the dataset. To obtain the data, I used GPT 5's deep research mode with the following prompt:
+
+> "For at least 50 countries providing a representative sample of the world, compile a .CSV format data set containing four columns: "country", "continent", "price", and "e", where "price" is the wholesale price/KG (in 2024 local currency) of a bunch of bananas and "e" is the spot exchange rate of the local currency with the US Dollar. Define a "bunch" of bananas as 1 kilogram of bananas for simplicity. Prioritize accuracy and provenance of the data, make necessary approximations or estimations but clearly note when you do so."
+
+The model requested clarification on the desired exchange rate, source preferences, retail/wholesale prices, and the selection of countries to consider. I provided the following answers:
+
+-   The exchange rate should be the average for the entire 2024 year
+-   Prioritize institutional sources over firm-level data whenever possible, but retail data can be used in markets where wholesale prices are difficult to find
+-   Only include sovereign nations, consider a representative sample of countries across the globe.
+
+For the predictive part of our analysis, we'll also need some auxiliary data points for each country. I'm choosing to include the following additional data points for each country:
+
+- **Banana Production**: This seems like the greatest determinant of banana price in each country, so we'll include a term for banana production in tonnes per 1000 people.
+
+- **Banana Imports**: Countries that import lots of bananas are more exposed to transaction costs and trade barriers that prevent the LOOP from holding. We can collect import data and investigate it's relationship with banana prices.
+
+- **GDP Per Capita**: We expect countries with higher incomes to have higher prices for consumer goods, so GDP per capita is probably a good predictor of banana price
+
+- **Logistics Performance Index (LPI)** : Another way of tracking the ease of foreign transactions is through the World Bank's Logistic Performance Index which measures the efficiency of logistics in each country. We expect higher logistic efficiency to imply lower banana prices.
+
+- **Inflation**: Inflation data for the 2024 year, which may introduce price discrepancies for countries that wouldn't otherwise have them (eg. Argentina, Turkey)
+
+Adding the above predictors to the prompt, we get figures for each feature with some estimation/imputation on the LLM's part. Thankfully this time there's a separate column for the "notes":
+
+```{r}
+bananas_raw <- read.csv(file = "bananas.csv", header = TRUE)
+
+# count the number of countries
+nrow(bananas_raw)
+
+# get the column names
+names(bananas_raw)
+
+# show a preview
+head(bananas_raw)
+```
+
+To validate the accuracy of the data set (never trust AI!!), I performed a 1-in-11 systematic sample and manually verified the figures for each country using the model's data sources. While all of the information I verified was correct, I noticed a few misformatted exchange rates in the data set that I manually corrected before importing the data. As we continue our analysis, I'll note any inconsistencies and how I fixed them.
+
+Gen AI statement:
+
+**AFTER DATA COLLECTION, GENERATIVE AI WAS NOT USED AT ANY POINT**
+
+# Part 2: EDA and Visualization
+
+Our first step to check for price discrepancy is to construct a global price index. The corollary to the LOOP, purchasing power parity, suggests that exchange rates move to "equalize" the price level across regions through arbitrage mechanisms.
+
+$$PPP\implies P_{US}=P_{FX}/E_{FX/US}$$ Where sub $FX$ denotes the price/exchange rate in a foreign country. Thus, we can compute the global price level by dividing the foreign price by the exchange rate.
+
+- Correction Note: I noticed incorrect exchange rates for Papua New Guinea and Jamaica, so I used the 2024 average according to the IMF
+
+```{r}
+library(dplyr)
+
+bananas <- bananas_raw |>
+           select(-notes) |>
+           rename(price_raw = price) |>
+           mutate(price = as.numeric(price_raw / e)) |>
+           select(country, continent, price_raw, price, everything())
+
+head(bananas)
+```
+
+With our price index complete, we can check the average price per continent:
+
+```{r}
+cont_table <- bananas |>
+              group_by(continent) |>
+              summarize(mean_price = round(mean(price), 3)) |>
+              arrange(desc(mean_price))
+
+cont_table
+```
+
+Just looking at the price per continent, it seems highly likely that there are price discrepancies across the globe. We can get a better idea of the distribution of prices using a world map.
+
+For ideal visualization, I'm making the scale follow banana colors :). Countries with higher prices will take greener hues while countries with lower prices are yellower.
+
+```{r}
+library(ggplot2)
+library(ggspatial)
+
+world_coords <- map_data("world") |>
+                filter(region != "Antarctica")
+
+world_plot <- ggplot() +
+              geom_map(data = world_coords, map = world_coords,
+                       aes(group = group, map_id = region),
+                           fill = "white", color = "black", linewidth = 0.5) + 
+              geom_map(data = bananas, map = world_coords,
+                       aes(fill = price, map_id = country),
+                           color = "#5b5b5b", linewidth = 0.5) +
+              coord_map("rectangular", lat0 = 0, xlim = c(-180,180), ylim = c(-60, 90)) +
+              scale_fill_continuous(low = "#DFB210", high = "#35bf52", guide = "colorbar") +
+              labs(fill = "Price (2024 USD)") +
+              ggtitle("Worldwide Banana Prices",
+                      subtitle = "Wholesale 2024 Price/KG for selected countries") +
+              ylab("") + xlab("") +
+              theme_minimal() +
+              theme(panel.background = element_rect(fill = '#87B8DF', color = 'black'))
+
+world_plot
+
+# dev.copy(device = png, filename = "world_plot.png", width = 1500, height = 750)
+# dev.off()
+```
+
+<br> Our map provides a more useful gauge of price distribution across the world. The general trends are consistent with the table - prices are highest in Europe, North America, and Oceania, and lowest in South America and Asia. Among all the continents, it seems that Africa has the greatest variation in price. We can investigate the price variation across each continent by adding standard deviation to our previous table:
+
+```{r}
+# previous table was already grouped so we need to remake it
+cont_table <- bananas |>
+              group_by(continent) |>
+              summarize(mean_price = round(mean(price), 3),
+                        std_dev = round(sd(price), 3)) |>
+              arrange(desc(std_dev))
+
+cont_table
+```
+
+Asia and Africa have the highest variation in banana prices, although North America is a close third place. Given the large variation in mean price country to country, it seems reasonable to include a variable for continent in our model. If this variable is significant, we have some evidence against the LOOP.
+
+Now that we're familiar with the price distribution across each continent and the globe, we can begin investigating each of the other features we collected. We'll use scatter plots to check out the shape, strength, and direction of the relationship between each feature and price.
+
+```{r}
+library(ggplot2)
+library(gridExtra)
+
+prod_plot <- ggplot(bananas, aes(x = prod, y = price)) + 
+             geom_point() + theme_bw() +
+             xlab("Production (Tonnes per 1000 pop.)") +
+             ylab("Price/KG (2024 USD)") +
+             ggtitle("Price by Production")
+
+gdp_plot <- ggplot(bananas, aes(x = percapgdp, y = price)) +
+            geom_point() + theme_bw() +
+            xlab("GDP Per Capita (2024 USD)") +
+            ylab("Price/KG (2024 USD)") +
+            ggtitle("Price by Per Capita GDP")
+
+import_plot <- ggplot(bananas, aes(x = imports, y = price)) +
+            geom_point() + theme_bw() +
+            xlab("Imports (Tonnes per 1000 pop.)") +
+            ylab("Price/KG (2024 USD)") +
+            ggtitle("Price by Imports")
+
+lpi_plot <- ggplot(bananas, aes(x = lpi, y = price)) +
+            geom_point() + theme_bw() +
+            xlab("Logistics Performance Index") +
+            ylab("Price/KG (2024 USD)") +
+            ggtitle("Price by LPI")
+
+inflation_plot <- ggplot(bananas, aes(x = inflation, y = price)) +
+                  geom_point() + theme_bw() +
+                  xlab("Inflation (%)") +
+                  ylab("Price/KG (2024 USD)") +
+                  ggtitle("Price by Inflation")
+
+grid.arrange(prod_plot, gdp_plot, import_plot, lpi_plot, inflation_plot,
+             ncol = 3, nrow = 2)
+
+# dev.copy(device = png, filename = "predictor_plots.png", width = 1000, height = 500)
+# dev.off()
+```
+
+The ideal predictor has a high correlation with the response variable, so we're looking for a pattern similar to a straight line or otherwise identifiable trend. Apart from LPI, each predictor has a large number of countries clustered around the x = 0 line. These points will limit the usefulness of each predictor, but there may be relationships between variables that turn out to be useful. While I expect inflation and imports are too clustered to be significant predictors, we observe the hierarchy principle and leave them in the model. The hierarchy principle requires the parent predictors of interaction terms to remian in the model. Worst case, we have an insignficant predictor that explain miniscule amounts of price variation.
+
+Unlike inflation and imports, LPI and per-capita GDP both appear to be moderately correlated with price. We can quantify this relationship:
+
+```{r}
+# check correlation for LPI
+cor(bananas$lpi, bananas$price)
+
+# check correlation for per-capita GDP
+cor(bananas$percapgdp, bananas$price)
+```
+
+We can see that per-capita GDP is most strongly correlated with banana prices. High correlation is good, but the cluster of points around the Y-axis is still not ideal. From my economics classes I know that per capita GDP is left skewed, so a log transformation would make sense. We can apply the transformation and see if the new variable looks more linear.
+
+I'm making another data frame to use for modeling
+
+```{r}
+banana_modeling <- bananas |>
+                   select(continent, price, percapgdp, imports, lpi, inflation) |>
+                   mutate(log_percapgdp = log(percapgdp))
+
+gdp_trans_plot <- ggplot(banana_modeling, aes(x = log_percapgdp, y = price)) +
+                  geom_point() + theme_bw() +
+                  xlab("Log(GDP) Per Capita (2024 USD)") +
+                  ylab("Price/KG (2024 USD)") +
+                  ggtitle("Price by Log Per Capita GDP")
+    
+grid.arrange(gdp_plot, gdp_trans_plot, nrow = 1, ncol = 2)
+```
+
+The graph on the right shows the transformed variable, which looks much more linear than before. With *linear* regression, we want our predictor-response relationships to be as *linear* as possible, so this transformation will help improve the accuracy of our models. Speaking of models:
+
+## Model Building
+
+Now with a better understanding of our data, we can begin building a model to predict the price of bananas for a given country. We'll start with a naive baseline using all available predictors to test against:
+
+```{r}
+naive_mod <- lm(price ~ ., banana_modeling)
+
+summary(naive_mod)
+```
+
+Our naive baseline model explains `r round(summary(naive_mod)$adj.r.squared * 100, 3)`% of variation in banana prices. From the output, we can see that only the indicator variables for Europe and South America provide significant explanatory power on their own. Let's test a model that includes interaction terms between predictors:
+
+```{r}
+mod2 <- lm(price ~ .^2, banana_modeling)
+
+summary(mod2)
+```
+
+Adding interaction terms increased our $R^2$ value to `r round(summary(mod2)$adj.r.squared, 3)`, which means the interaction terms help explain an additional `r round(summary(mod2)$adj.r.squared - summary(naive_mod)$adj.r.squared, 3)*100`% of the variation in banana prices. While this is a big improvement, the interactions between all of the continent indicator variables make our model overparameterized. The missing values indicate a lack of sufficient data, which makes sense given the model has `r length(mod2$coefficients)` terms and our data set has `r nrow(banana_modeling)` observations.
+
+To reduce the size of our model, we'll go from a full second order model to a partial second order model, only including first order terms for each continent.
+
+```{r}
+mod3 <- lm(price ~ (. -continent)^3 + continent, banana_modeling)
+
+summary(mod3)
+```
+
+This more concise model explains `r round(summary(mod2)$adj.r.squared - summary(mod3)$adj.r.squared, 3)`% less variation in price but the overall significance of our model has increased greatly (shown by the change in global p-value). This value compares our model performance with a baseline (intercept only) model. The lower the p-value, the comparatively better job our model does.
+
+While our model does a moderate job of predicting prices, we can see that only three predictors are significant by any reasonable standard. To obtain a more concise model, we can try to pare down the model with backwards stepwise selection. By default, stepwise selection in R uses AIC which favors more complex models with higher explanatory power. Going backwards means we're removing the least important predictor (or predictor interaction) until the AIC of the model is maximized.
+
+```{r}
+mod4 <- step(mod3, scope = price ~ ., trace = FALSE)
+
+summary(mod4)
+```
+
+With the backwards stepwise selection, our $R^2$ value increases to `r round(summary(mod4)$adj.r.squared, 3)` and we've removed `r length(mod3$coefficients) - length(mod4$coefficients)` predictors. Instead of backwards selection, we can also try a bidirectional stepwise selection where the model can drop or add predictors at each step, starting from `mod3`. This should produce the simplest, most powerful model.
+
+```{r}
+mod5 <- step(mod3, scope = price ~ ., direction = "both", trace = FALSE)
+
+summary(mod5)
+```
+
+Using bidirectional stepwise selection, the same predictor set was chosen. It seems like this is the optimal model for our purposes. During tuning we've substantially increased the proportion of variation our model explains while keeping it as concise as possible.
+
+## Cross Validation
+
+But wait! If you're familiar with regression you know that the judging a model's performance by it's predictions of training data is not the best practice because it can lead to overfitting. Instead, we should test the model's accuracy on a country it hasn't seen before.
+
+We're going to use leave out one cross validation (LOOCV), which excludes one country from the model fitting process and then tests the model's accuracy on that country. The process is then repeated for each country in the data set, averaging the test error until we have a representative error metric.
+
+I'm using the built-in LOOCV functionality included in the `caret` package to perform cross validation on model 5. I choose to perform LOOCV over K-fold because we don't have many observations in the data set and I saw large variations in model coefficients split-to-split. LOOCV is more stable and makes sense for our purposes, at the expense of being more computationally taxing.
+
+```{r}
+library(caret)
+
+train_ctrl <- trainControl(method = "cv", number = 10)
+
+ideal_formula <- mod5$call[[2]]
+
+full_mod <- train(ideal_formula, data = banana_modeling, method = "lm", trControl = train_ctrl)
+
+print(full_mod)
+```
+
+We can see that the cross-validated $R^2$ is `r round(summary(mod5)$adj.r.squared, 3) - round(full_mod$results$Rsquared, 3)` lower than our training $R^2$. We expect to see a hit in accuracy because the model is predicting a value not seen during its training. CV test error is crucial in evaluating a model's real-world performance; it doesn't make sense to predict a value you've already collected.
+
+## Analyzing Model Performance
+
+Now that we have a tuned model, I'm curious to see how well it predicts banana prices. According to the LOOP, we would expect to see roughly the same price everywhere. If our model does a good job predicting prices, we have some evidence against the LOOP's credibility.
+
+First, let's check the largest discrepancies between the model and the real data:
+
+```{r}
+banana_preds <- predict(full_mod, newdata = banana_modeling, type = "raw")
+
+banana_dev <- bananas |>
+              mutate(prediction = banana_preds,
+                     deviation = prediction - price,
+                     abs_dev = abs(deviation)) |>
+              arrange(desc(abs_dev)) |>
+              select(country, price, prediction, deviation, abs_dev)
+
+head(banana_dev, n = 10)
+```
+
+A cursory glance at the deviation column shows that our model seems to over and under estimate prices at roughly equal frequencies. In general, we'd expect the residuals to lie equally above and below the true values. We can check this using a residual plot.
+
+```{r}
+qqnorm(banana_dev$deviation)
+qqline(banana_dev$deviation)
+```
+
+When examining a QQ-plot, we'd like the residuals to lie perfectly on the line which would indicate our data has a perfectly normal distribution. While it seems this is generally true, the sinusoidal waviness of the tails of the residuals makes me think there might be a higher order trend at play. In a future addition, I'm going to test a ridge or LASSO model which would allow the model to take different curvature depending on the data's distribution.
+
+We can also examine the deviation visually using our beloved world map. I'm forgoing the banana color scheme to improve interpretability; we'll represent negative deviations (over estimations) with *red* and positive deviations (under estimations) with *blue*.
+
+```{r}
+mean_dev <- round(mean(abs(banana_dev$deviation)), 2)
+mean_price <- round(mean(banana_dev$price), 2)
+
+subt <- paste0("Mean Deviation: $", mean_dev, ", Mean Price: $", mean_price)
+
+dev_plot <- ggplot() +
+            geom_map(data = world_coords, map = world_coords,
+                      aes(group = group, map_id = region),
+                           fill = "white", color = "black", linewidth = 0.5) + 
+              geom_map(data = banana_dev, map = world_coords,
+                       aes(fill = deviation, map_id = country),
+                           color="#5b5b5b", linewidth = 0.5) +
+              coord_map("rectangular", lat0=0, xlim = c(-180,180), ylim = c(-60, 90)) +
+              scale_fill_continuous(low="red", high="blue", guide = "colorbar") +
+              labs(fill = "Deviation (USD/KG)") +
+              ggtitle("Prediction Error for Final Model",
+                      subtitle = subt) +
+              ylab("") + xlab("") +
+              theme_minimal() +
+              theme(panel.background = element_rect(fill = '#87B8DF', color = 'black'))
+
+dev_plot
+
+#dev.copy(device = png, filename = "deviation_plot.png", width = 1500, height = 750)
+#dev.off()
+```
+
+Broadly, we see that the model tends to underestimate the cost for North America, Europe, and Oceania, while it's more accurate for South America and South Asia. As we noticed in the EDA phase, Africa has a wide variety in banana prices and the model struggles to predict prices accurately.
+
+# Part 3: Conclusion:
+
+With our final model accounting for logistics performance, income differences, and other factors, we can explain half of all variation in banana pricing. This is a somewhat unsatisfying result, as the LOOP suggests we should be able to explain almost all of the variation in pricing if we account for shipping and transaction costs. Our model's ability to explain *some* of the variation suggests that the LOOP applies in some capacity, but doesn't hold absolutely.
+
+It is known that the LOOP does not hold in practice, often due to over/undervalued currencies or government intervention in free trade. This seems consistent with our result, where we can partially (but not totally) explain fluctuations in pricing.
+
+# Part 4: Next Steps
+
+To further bolster our analysis, I plan to consider the following:
+
+- Ridge/LASSO/PSR for curve smoothing in the regression model
+- Adding predictors for tax and tariff rates
+- Experimenting with KNN and regression trees (would require more data)
